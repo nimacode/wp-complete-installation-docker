@@ -7,16 +7,15 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}###################################################################${NC}"
-echo -e "${BLUE}# WP Docker Auto Deploy (PDO + ionCube + phpMyAdmin Edition)      #${NC}"
+echo -e "${BLUE}# WP Docker Deploy (Manual ionCube Injection Edition)             #${NC}"
 echo -e "${BLUE}###################################################################${NC}"
 
-# --- بررسی دسترسی Root ---
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Please run as root (sudo ./deploy.sh)${NC}"
   exit
 fi
 
-# --- گام صفر: تنظیم Mirror برای عبور از تحریم ---
+# --- گام صفر: تنظیم داکر ---
 echo -e "${BLUE}>>> Configuring Docker Mirrors...${NC}"
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<EOF
@@ -29,9 +28,8 @@ cat > /etc/docker/daemon.json <<EOF
 }
 EOF
 
-# --- گام ۱: نصب داکر ---
 if ! command -v docker &> /dev/null; then
-    echo -e "${BLUE}>>> Docker not found. Installing...${NC}"
+    echo -e "${BLUE}>>> Installing Docker...${NC}"
     apt-get update -y
     apt-get install -y ca-certificates curl gnupg lsb-release
     mkdir -p /etc/apt/keyrings
@@ -42,15 +40,15 @@ if ! command -v docker &> /dev/null; then
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
-
 systemctl daemon-reload
 systemctl restart docker
 systemctl enable docker
-sleep 5
+sleep 3
 
-# --- گام ۲: دریافت اطلاعات ---
+# --- گام ۱: دریافت اطلاعات ---
 echo ""
-read -p "Enter your Domain Name (e.g., example.com): " DOMAIN_NAME
+echo -e "${RED}!!! TYPE CAREFULLY !!!${NC}"
+read -p "Enter your Domain Name (e.g., eevgold.com): " DOMAIN_NAME
 read -p "Enter your Email (for SSL renewal): " EMAIL_ADDR
 read -s -p "Enter Database Root Password: " DB_ROOT_PASS
 echo ""
@@ -58,18 +56,38 @@ read -s -p "Enter Database User Password: " DB_USER_PASS
 echo ""
 
 PROJECT_DIR="/opt/$DOMAIN_NAME"
-if [ ! -d "$PROJECT_DIR" ]; then
-    mkdir -p "$PROJECT_DIR"
-fi
+mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-echo -e "${GREEN}>>> Creating/Updating project files...${NC}"
-mkdir -p nginx/conf.d
-mkdir -p php
-mkdir -p certbot/conf
-mkdir -p certbot/www
+# --- گام ۲: دانلود ionCube روی هاست ---
+echo -e "${BLUE}>>> Checking for ionCube Loader file...${NC}"
+IONCUBE_URL="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_alpine.tar.gz"
+IONCUBE_FILE="ioncube.tar.gz"
+
+if [ -f "$IONCUBE_FILE" ]; then
+    echo -e "${GREEN}>>> Local ionCube file found. Using it.${NC}"
+else
+    echo -e "${BLUE}>>> Downloading ionCube to host...${NC}"
+    # تلاش برای دانلود با جعل User Agent
+    curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o $IONCUBE_FILE $IONCUBE_URL
+    
+    # بررسی سلامت فایل
+    if file $IONCUBE_FILE | grep -q "gzip compressed data"; then
+        echo -e "${GREEN}>>> Download Successful!${NC}"
+    else
+        echo -e "${RED}!!! DOWNLOAD FAILED !!!${NC}"
+        echo -e "${RED}The server cannot download ionCube directly (Firewall/Sanctions).${NC}"
+        echo -e "${BLUE}Please download this file on your PC:${NC}"
+        echo -e "${BLUE}$IONCUBE_URL${NC}"
+        echo -e "${BLUE}And upload it to: $PROJECT_DIR/$IONCUBE_FILE${NC}"
+        echo -e "${RED}After uploading, run this script again.${NC}"
+        rm $IONCUBE_FILE # پاک کردن فایل خراب
+        exit 1
+    fi
+fi
 
 # --- گام ۳: ساخت فایل‌ها ---
+mkdir -p nginx/conf.d php certbot/conf certbot/www
 
 # .env
 cat > .env <<EOF
@@ -93,23 +111,21 @@ post_max_size = 64M
 max_execution_time = 300
 EOF
 
-# --- Dockerfile (PDO + ionCube) ---
-# این بخش قلب تپنده تغییرات است
+# --- Dockerfile (روش کپی کردن فایل دانلود شده) ---
 cat > Dockerfile <<EOF
 FROM wordpress:6.4-php8.1-fpm-alpine
 
-# نصب ابزارهای لازم برای دانلود
-RUN apk add --no-cache curl tar
+# نصب ابزارها و PDO
+RUN apk add --no-cache tar && docker-php-ext-install pdo pdo_mysql
 
-# 1. نصب درایورهای دیتابیس (PDO MySQL)
-RUN docker-php-ext-install pdo pdo_mysql
+# کپی کردن فایل ionCube که روی هاست دانلود کردیم به داخل ایمیج
+COPY ioncube.tar.gz /tmp/ioncube.tar.gz
 
-# 2. نصب ionCube Loader (مخصوص Alpine و PHP 8.1)
-RUN curl -fsSL 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_alpine.tar.gz' -o ioncube.tar.gz \\
-    && tar -xf ioncube.tar.gz \\
-    && mv ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
+# استخراج و نصب
+RUN tar -xf /tmp/ioncube.tar.gz -C /tmp \\
+    && mv /tmp/ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
     && echo "zend_extension=ioncube_loader_lin_8.1.so" > /usr/local/etc/php/conf.d/00-ioncube.ini \\
-    && rm -rf ioncube ioncube.tar.gz
+    && rm -rf /tmp/ioncube /tmp/ioncube.tar.gz
 EOF
 
 # Docker Compose
@@ -189,70 +205,23 @@ EOF
 
 # --- گام ۴: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Building custom image (This installs ionCube & PDO)...${NC}"
-# فورس بیلد می‌کنیم تا کش قبلی باعث نشود نصب ionCube انجام نشود
+echo -e "${BLUE}>>> Building custom image using LOCAL ioncube.tar.gz...${NC}"
 docker compose build --no-cache
 
-# بررسی وجود SSL برای تصمیم‌گیری کانفیگ Nginx
+# بررسی SSL
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Applying final config...${NC}"
-    
-    # کانفیگ نهایی با SSL و phpMyAdmin
-    cat > nginx/conf.d/default.conf <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
-    location /.well-known/acme-challenge/ { root /var/www/certbot; }
-    location / { return 301 https://\$host\$request_uri; }
-}
-
-server {
-    listen 443 ssl;
-    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem;
-    root /var/www/html;
-    index index.php;
-    client_max_body_size 64M;
-
-    location / { try_files \$uri \$uri/ /index.php?\$args; }
-    location ~ \.php$ {
-        try_files \$uri =404;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
-        fastcgi_pass wordpress:9000;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
-    }
-
-    location ^~ /pma/ {
-        proxy_pass http://phpmyadmin:80/;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ { expires max; log_not_found off; }
-}
-EOF
-
+    echo -e "${GREEN}>>> SSL config found. Updating services...${NC}"
     docker compose down
     docker compose up -d
     echo -e "${BLUE}>>> Fixing Permissions...${NC}"
     sleep 5
     docker exec wp_app chown -R www-data:www-data /var/www/html
-    
-    echo -e "${GREEN}###################################################################${NC}"
-    echo -e "${GREEN} DONE! ionCube + PDO + phpMyAdmin installed successfully. ${NC}"
-    echo -e "${GREEN}###################################################################${NC}"
+    echo -e "${GREEN}SUCCESS!${NC}"
     exit 0
 fi
 
-# اگر برای اولین بار است (SSL نداریم)
-echo -e "${BLUE}>>> Setting up SSL for the first time...${NC}"
-
+# نصب SSL اولیه
+echo -e "${BLUE}>>> Setting up SSL...${NC}"
 cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -264,14 +233,16 @@ EOF
 
 docker compose up -d webserver
 sleep 10
+echo -e "${BLUE}>>> Requesting Certbot SSL for $DOMAIN_NAME...${NC}"
 docker compose run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN_NAME -d www.$DOMAIN_NAME --email $EMAIL_ADDR --agree-tos --no-eff-email --force-renewal
 
 if [ ! -d "./certbot/conf/live/$DOMAIN_NAME" ]; then
     echo -e "${RED}!!! SSL FAILED !!!${NC}"
+    echo -e "${RED}Check DNS for $DOMAIN_NAME (Did you type it correctly?)${NC}"
     exit 1
 fi
 
-# کانفیگ نهایی پس از SSL
+# کانفیگ نهایی
 cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -279,7 +250,6 @@ server {
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
     location / { return 301 https://\$host\$request_uri; }
 }
-
 server {
     listen 443 ssl;
     server_name $DOMAIN_NAME www.$DOMAIN_NAME;
@@ -299,7 +269,6 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param PATH_INFO \$fastcgi_path_info;
     }
-
     location ^~ /pma/ {
         proxy_pass http://phpmyadmin:80/;
         proxy_set_header Host \$host;
@@ -307,18 +276,16 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
-
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ { expires max; log_not_found off; }
 }
 EOF
 
 docker compose down
 docker compose up -d
-
 echo -e "${BLUE}>>> Fixing Permissions...${NC}"
 sleep 5
 docker exec wp_app chown -R www-data:www-data /var/www/html
 
 echo -e "${GREEN}###################################################################${NC}"
-echo -e "${GREEN} DONE! ionCube + PDO + phpMyAdmin installed successfully. ${NC}"
+echo -e "${GREEN} DONE! Website is live: https://$DOMAIN_NAME ${NC}"
 echo -e "${GREEN}###################################################################${NC}"
