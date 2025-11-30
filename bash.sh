@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# --- تنظیمات اولیه ---
+# --- تنظیمات رنگ ---
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}#########################################################################${NC}"
-echo -e "${BLUE}# WP Docker Auto Deploy (Debian + PDO + ionCube + SourceGuardian)       #${NC}"
+echo -e "${BLUE}#   ULTIMATE DEPLOY (Custom Structure + All Loaders + SSL + PMA)        #${NC}"
 echo -e "${BLUE}#########################################################################${NC}"
 
 # --- بررسی دسترسی Root ---
@@ -71,6 +71,8 @@ cd "$PROJECT_DIR"
 echo -e "${GREEN}>>> Creating project files...${NC}"
 mkdir -p nginx/conf.d php certbot/conf certbot/www
 
+# نکته: اگر wp_data از قبل وجود دارد، به آن دست نمی‌زنیم!
+
 # --- گام ۳: ساخت فایل‌ها ---
 
 # .env
@@ -105,7 +107,7 @@ RUN apt-get update && apt-get install -y curl tar
 # 1. نصب PDO
 RUN docker-php-ext-install pdo pdo_mysql
 
-# 2. نصب ionCube Loader
+# 2. نصب ionCube Loader (لینک استاندارد)
 RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o ioncube.tar.gz 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' \\
     && tar -xf ioncube.tar.gz \\
     && mv ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
@@ -113,7 +115,6 @@ RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o ioncube.tar.gz 'ht
     && rm -rf ioncube ioncube.tar.gz
 
 # 3. نصب SourceGuardian Loader
-# دانلود، اکسترکت و کپی فایل ixed.8.1.lin به مسیر اکستنشن‌ها
 RUN curl -L -o sourceguardian.tar.gz https://www.sourceguardian.com/loaders/download/loaders.linux-x86_64.tar.gz \\
     && tar -xf sourceguardian.tar.gz \\
     && cp ixed.8.1.lin \$(php-config --extension-dir) \\
@@ -121,7 +122,7 @@ RUN curl -L -o sourceguardian.tar.gz https://www.sourceguardian.com/loaders/down
     && rm -rf sourceguardian.tar.gz *.lin
 EOF
 
-# Docker Compose
+# --- Docker Compose (Custom Structure Mapping) ---
 cat > docker-compose.yml <<EOF
 version: '3.8'
 
@@ -144,7 +145,12 @@ services:
       - db
     env_file: .env
     volumes:
-      - wp_data:/var/www/html
+      # --- نکته طلایی: حفظ ساختار شما ---
+      # پوشه wp_data شما مستقیماً به wp-content وصل می‌شود.
+      # فایل‌های هسته وردپرس (index.php, wp-admin) از خود ایمیج خوانده می‌شوند.
+      - ./wp_data:/var/www/html/wp-content
+      
+      # تنظیمات آپلود
       - ./php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
     networks:
       - wp_net
@@ -170,7 +176,9 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - wp_data:/var/www/html:ro
+      # Nginx هم باید wp_data را به عنوان wp-content ببیند
+      - ./wp_data:/var/www/html/wp-content:ro
+      
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
@@ -188,7 +196,6 @@ services:
       - ./certbot/www:/var/www/certbot
 
 volumes:
-  wp_data:
   db_data:
 
 networks:
@@ -198,12 +205,12 @@ EOF
 
 # --- گام ۴: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Building custom image (With SourceGuardian)...${NC}"
+echo -e "${BLUE}>>> Building custom image (With all loaders & Custom Structure)...${NC}"
 docker compose build --no-cache
 
 # بررسی SSL
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Updating services...${NC}"
+    echo -e "${GREEN}>>> SSL config found. Applying final config...${NC}"
     
     # کانفیگ نهایی
     cat > nginx/conf.d/default.conf <<EOF
@@ -222,6 +229,13 @@ server {
     index index.php;
     client_max_body_size 64M;
 
+    # سرو کردن مستقیم فایل‌های استاتیک برای جلوگیری از ۴۰۴
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires max;
+        log_not_found off;
+        try_files \$uri =404;
+    }
+
     location / { try_files \$uri \$uri/ /index.php?\$args; }
     location ~ \.php$ {
         try_files \$uri =404;
@@ -239,16 +253,16 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ { expires max; log_not_found off; }
 }
 EOF
     
     docker compose down
     docker compose up -d
-    echo -e "${BLUE}>>> Fixing Permissions...${NC}"
+    echo -e "${BLUE}>>> Fixing Permissions (Owner: www-data)...${NC}"
     sleep 5
-    docker exec wp_app chown -R www-data:www-data /var/www/html
-    echo -e "${GREEN}SUCCESS!${NC}"
+    # این دستور پرمیشن‌های پوشه wp_data شما را برای Nginx درست می‌کند
+    docker exec wp_app chown -R www-data:www-data /var/www/html/wp-content
+    echo -e "${GREEN}SUCCESS! Structure preserved. Site is UP.${NC}"
     exit 0
 fi
 
@@ -291,6 +305,12 @@ server {
     index index.php;
     client_max_body_size 64M;
 
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires max;
+        log_not_found off;
+        try_files \$uri =404;
+    }
+
     location / { try_files \$uri \$uri/ /index.php?\$args; }
     location ~ \.php$ {
         try_files \$uri =404;
@@ -308,15 +328,14 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ { expires max; log_not_found off; }
 }
 EOF
 
 docker compose down
 docker compose up -d
-echo -e "${BLUE}>>> Fixing Permissions...${NC}"
+echo -e "${BLUE}>>> Fixing Permissions (Owner: www-data)...${NC}"
 sleep 5
-docker exec wp_app chown -R www-data:www-data /var/www/html
+docker exec wp_app chown -R www-data:www-data /var/www/html/wp-content
 
 echo -e "${GREEN}###################################################################${NC}"
 echo -e "${GREEN} DONE! Website is live: https://$DOMAIN_NAME ${NC}"
