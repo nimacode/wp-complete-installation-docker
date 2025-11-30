@@ -1,16 +1,13 @@
 #!/bin/bash
 
-# --- تنظیمات اولیه و توقف در صورت بروز خطای حیاتی ---
-# set -e # (غیرفعال شد تا بتوانیم خطاها را مدیریت کنیم)
-
-# رنگ‌ها
+# --- تنظیمات اولیه ---
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}#########################################################${NC}"
-echo -e "${BLUE}#     Ultimate WordPress + Docker + SSL Auto Deploy     #${NC}"
+echo -e "${BLUE}#   WP Docker Auto Deploy (Anti-Sanction Edition)       #${NC}"
 echo -e "${BLUE}#########################################################${NC}"
 
 # --- بررسی دسترسی Root ---
@@ -19,45 +16,51 @@ if [ "$EUID" -ne 0 ]; then
   exit
 fi
 
-# --- بخش ۱: نصب و تعمیر Docker ---
-echo -e "${BLUE}>>> Checking Docker Installation...${NC}"
+# --- گام صفر: تنظیم Mirror برای عبور از تحریم داکر ---
+echo -e "${BLUE}>>> Configuring Docker Mirrors (Anti-Sanction)...${NC}"
 
+# ایجاد پوشه تنظیمات داکر اگر وجود ندارد
+mkdir -p /etc/docker
+
+# نوشتن فایل تنظیمات داکر با میرورهای فعال
+cat > /etc/docker/daemon.json <<EOF
+{
+  "registry-mirrors": [
+    "https://docker.iranserver.com",
+    "https://docker.arvancloud.ir",
+    "https://mirror.gcr.io"
+  ]
+}
+EOF
+
+# --- گام ۱: نصب داکر (اگر نصب نیست) ---
 if ! command -v docker &> /dev/null; then
-    echo -e "${BLUE}>>> Docker not found. Starting installation process...${NC}"
+    echo -e "${BLUE}>>> Docker not found. Installing...${NC}"
     
-    # 1. آپدیت سیستم و نصب پیش‌نیازها
     apt-get update -y
     apt-get install -y ca-certificates curl gnupg lsb-release
 
-    # 2. اضافه کردن کلید امنیتی (اگر پوشه نباشد می‌سازد)
     mkdir -p /etc/apt/keyrings
-    if [ -f /etc/apt/keyrings/docker.gpg ]; then
-        rm /etc/apt/keyrings/docker.gpg
-    fi
+    if [ -f /etc/apt/keyrings/docker.gpg ]; then rm /etc/apt/keyrings/docker.gpg; fi
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
 
-    # 3. اضافه کردن مخزن (به صورت تک خطی برای جلوگیری از خطا)
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    # 4. آپدیت و نصب نهایی
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-    # 5. استارت سرویس
-    systemctl start docker
-    systemctl enable docker
-    
-    echo -e "${GREEN}>>> Docker installed successfully!${NC}"
-else
-    echo -e "${GREEN}>>> Docker is already installed.${NC}"
 fi
 
-# اطمینان از بالا بودن داکر
-echo -e "${BLUE}>>> Waiting for Docker daemon...${NC}"
+# ریستارت داکر برای اعمال تغییرات Mirror
+echo -e "${BLUE}>>> Restarting Docker to apply configurations...${NC}"
+systemctl daemon-reload
+systemctl restart docker
+systemctl enable docker
+
+# انتظار برای بالا آمدن سرویس
 sleep 5
 
-# --- بخش ۲: دریافت اطلاعات ---
+# --- گام ۲: دریافت اطلاعات ---
 echo ""
 read -p "Enter your Domain Name (e.g., example.com): " DOMAIN_NAME
 read -p "Enter your Email (for SSL renewal): " EMAIL_ADDR
@@ -68,9 +71,9 @@ echo ""
 
 PROJECT_DIR="/opt/$DOMAIN_NAME"
 
-# پاکسازی نصب‌های قبلی اگر وجود داشته باشد
+# پاکسازی تلاش ناموفق قبلی
 if [ -d "$PROJECT_DIR" ]; then
-    echo -e "${BLUE}>>> Cleaning up existing project directory...${NC}"
+    echo -e "${BLUE}>>> Cleaning up previous attempt...${NC}"
     cd "$PROJECT_DIR"
     docker compose down 2>/dev/null || true
     cd ..
@@ -79,15 +82,15 @@ fi
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-echo -e "${GREEN}>>> Creating directory structure in $PROJECT_DIR...${NC}"
+echo -e "${GREEN}>>> Creating project files in $PROJECT_DIR...${NC}"
 mkdir -p nginx/conf.d
 mkdir -p php
 mkdir -p certbot/conf
 mkdir -p certbot/www
 
-# --- بخش ۳: ساخت فایل‌های کانفیگ ---
+# --- گام ۳: ساخت فایل‌ها ---
 
-# 1. .env
+# .env
 cat > .env <<EOF
 MYSQL_ROOT_PASSWORD=$DB_ROOT_PASS
 MYSQL_DATABASE=wordpress
@@ -100,7 +103,7 @@ WORDPRESS_DB_PASSWORD=$DB_USER_PASS
 DOMAIN_NAME=$DOMAIN_NAME
 EOF
 
-# 2. PHP Uploads Config
+# PHP Config
 cat > php/uploads.ini <<EOF
 file_uploads = On
 memory_limit = 256M
@@ -109,7 +112,7 @@ post_max_size = 64M
 max_execution_time = 300
 EOF
 
-# 3. docker-compose.yml
+# Docker Compose
 cat > docker-compose.yml <<EOF
 version: '3.8'
 
@@ -170,11 +173,13 @@ networks:
     driver: bridge
 EOF
 
-# --- بخش ۴: دریافت SSL ---
+# --- گام ۴: دریافت SSL ---
 
-echo -e "${BLUE}>>> Generating TEMPORARY Nginx config for SSL challenge...${NC}"
+echo -e "${BLUE}>>> Downloading images (This might take a while)...${NC}"
+# تست دانلود ایمیج‌ها قبل از اجرا
+docker compose pull
 
-# نکته: در اینجا از \$ استفاده می‌کنیم تا متغیرهای Nginx موقع ساخت فایل تفسیر نشوند
+echo -e "${BLUE}>>> Generating TEMPORARY Nginx config...${NC}"
 cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -190,27 +195,24 @@ server {
 }
 EOF
 
-echo -e "${GREEN}>>> Starting Webserver (HTTP only)...${NC}"
+echo -e "${GREEN}>>> Starting Webserver...${NC}"
 docker compose up -d webserver
 
-echo -e "${BLUE}>>> Waiting for Nginx to launch...${NC}"
-sleep 5
+echo -e "${BLUE}>>> Waiting for Nginx...${NC}"
+sleep 10
 
-echo -e "${BLUE}>>> Requesting Certbot SSL...${NC}"
+echo -e "${BLUE}>>> Requesting SSL from Let's Encrypt...${NC}"
 docker compose run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN_NAME -d www.$DOMAIN_NAME --email $EMAIL_ADDR --agree-tos --no-eff-email --force-renewal
 
-# بررسی موفقیت SSL
 if [ ! -d "./certbot/conf/live/$DOMAIN_NAME" ]; then
-    echo -e "${RED}!!! SSL GENERATION FAILED !!!${NC}"
-    echo -e "${RED}Check: 1. Is Domain DNS (A Record) pointing to this IP?${NC}"
-    echo -e "${RED}       2. Is Firewall blocking port 80?${NC}"
-    # کانتینرها را پایین نمی‌آوریم تا بتوانید لاگ‌ها را چک کنید
+    echo -e "${RED}!!! SSL FAILED !!!${NC}"
+    echo -e "${RED}Check logs above. If it's a network error, try running the script again.${NC}"
     exit 1
 fi
 
-# --- بخش ۵: کانفیگ نهایی ---
+# --- گام ۵: تنظیمات نهایی ---
 
-echo -e "${GREEN}>>> SSL Success! Applying PRODUCTION config...${NC}"
+echo -e "${GREEN}>>> SSL Success! Applying Final Config...${NC}"
 
 cat > nginx/conf.d/default.conf <<EOF
 server {
@@ -262,15 +264,14 @@ server {
 }
 EOF
 
-echo -e "${BLUE}>>> Reloading Nginx with SSL...${NC}"
+echo -e "${BLUE}>>> Reloading Services...${NC}"
 docker compose down
 docker compose up -d
 
-echo -e "${BLUE}>>> Setting Permissions...${NC}"
-# صبر برای بالا آمدن کانتینر وردپرس
+echo -e "${BLUE}>>> Fixing Permissions...${NC}"
 sleep 5
 docker exec wp_app chown -R www-data:www-data /var/www/html
 
 echo -e "${GREEN}#######################################################${NC}"
-echo -e "${GREEN} SUCCESS! Your site is live: https://$DOMAIN_NAME ${NC}"
+echo -e "${GREEN} DONE! Website is live: https://$DOMAIN_NAME ${NC}"
 echo -e "${GREEN}#######################################################${NC}"
