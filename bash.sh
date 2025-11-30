@@ -7,15 +7,16 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}###################################################################${NC}"
-echo -e "${BLUE}# WP Docker Deploy (Manual ionCube Injection Edition)             #${NC}"
+echo -e "${BLUE}# WP Docker Auto Deploy (Debian + Standard ionCube Edition)       #${NC}"
 echo -e "${BLUE}###################################################################${NC}"
 
+# --- بررسی دسترسی Root ---
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Please run as root (sudo ./deploy.sh)${NC}"
   exit
 fi
 
-# --- گام صفر: تنظیم داکر ---
+# --- گام صفر: تنظیم Mirror داکر (ضد تحریم) ---
 echo -e "${BLUE}>>> Configuring Docker Mirrors...${NC}"
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<EOF
@@ -28,8 +29,9 @@ cat > /etc/docker/daemon.json <<EOF
 }
 EOF
 
+# --- گام ۱: نصب داکر ---
 if ! command -v docker &> /dev/null; then
-    echo -e "${BLUE}>>> Installing Docker...${NC}"
+    echo -e "${BLUE}>>> Docker not found. Installing...${NC}"
     apt-get update -y
     apt-get install -y ca-certificates curl gnupg lsb-release
     mkdir -p /etc/apt/keyrings
@@ -40,14 +42,15 @@ if ! command -v docker &> /dev/null; then
     apt-get update -y
     apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
+
 systemctl daemon-reload
 systemctl restart docker
 systemctl enable docker
-sleep 3
+sleep 5
 
-# --- گام ۱: دریافت اطلاعات ---
+# --- گام ۲: دریافت اطلاعات ---
 echo ""
-echo -e "${RED}!!! TYPE CAREFULLY !!!${NC}"
+echo -e "${RED}!!! TYPE CAREFULLY (eevgold vs evvgold) !!!${NC}"
 read -p "Enter your Domain Name (e.g., eevgold.com): " DOMAIN_NAME
 read -p "Enter your Email (for SSL renewal): " EMAIL_ADDR
 read -s -p "Enter Database Root Password: " DB_ROOT_PASS
@@ -55,39 +58,20 @@ echo ""
 read -s -p "Enter Database User Password: " DB_USER_PASS
 echo ""
 
+# هشدار غلط املایی
+if [[ "$DOMAIN_NAME" == *"evvgold"* ]]; then
+    echo -e "${RED}WARNING: You typed 'evvgold' (double V). Usually it is 'eevgold' (double E).${NC}"
+    read -p "Press Enter if 'evvgold' is correct, or Ctrl+C to cancel."
+fi
+
 PROJECT_DIR="/opt/$DOMAIN_NAME"
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-# --- گام ۲: دانلود ionCube روی هاست ---
-echo -e "${BLUE}>>> Checking for ionCube Loader file...${NC}"
-IONCUBE_URL="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_alpine.tar.gz"
-IONCUBE_FILE="ioncube.tar.gz"
-
-if [ -f "$IONCUBE_FILE" ]; then
-    echo -e "${GREEN}>>> Local ionCube file found. Using it.${NC}"
-else
-    echo -e "${BLUE}>>> Downloading ionCube to host...${NC}"
-    # تلاش برای دانلود با جعل User Agent
-    curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o $IONCUBE_FILE $IONCUBE_URL
-    
-    # بررسی سلامت فایل
-    if file $IONCUBE_FILE | grep -q "gzip compressed data"; then
-        echo -e "${GREEN}>>> Download Successful!${NC}"
-    else
-        echo -e "${RED}!!! DOWNLOAD FAILED !!!${NC}"
-        echo -e "${RED}The server cannot download ionCube directly (Firewall/Sanctions).${NC}"
-        echo -e "${BLUE}Please download this file on your PC:${NC}"
-        echo -e "${BLUE}$IONCUBE_URL${NC}"
-        echo -e "${BLUE}And upload it to: $PROJECT_DIR/$IONCUBE_FILE${NC}"
-        echo -e "${RED}After uploading, run this script again.${NC}"
-        rm $IONCUBE_FILE # پاک کردن فایل خراب
-        exit 1
-    fi
-fi
+echo -e "${GREEN}>>> Creating project files...${NC}"
+mkdir -p nginx/conf.d php certbot/conf certbot/www
 
 # --- گام ۳: ساخت فایل‌ها ---
-mkdir -p nginx/conf.d php certbot/conf certbot/www
 
 # .env
 cat > .env <<EOF
@@ -111,21 +95,25 @@ post_max_size = 64M
 max_execution_time = 300
 EOF
 
-# --- Dockerfile (روش کپی کردن فایل دانلود شده) ---
+# --- Dockerfile (تغییر یافته به Debian) ---
+# مزیت: از لینک اصلی ionCube که شما دادید پشتیبانی می‌کند
 cat > Dockerfile <<EOF
-FROM wordpress:6.4-php8.1-fpm-alpine
+FROM wordpress:6.4-php8.1-fpm
 
-# نصب ابزارها و PDO
-RUN apk add --no-cache tar && docker-php-ext-install pdo pdo_mysql
+# نصب ابزارهای دانلود (استفاده از apt به جای apk)
+RUN apt-get update && apt-get install -y curl tar
 
-# کپی کردن فایل ionCube که روی هاست دانلود کردیم به داخل ایمیج
-COPY ioncube.tar.gz /tmp/ioncube.tar.gz
+# 1. نصب درایورهای دیتابیس (PDO)
+RUN docker-php-ext-install pdo pdo_mysql
 
-# استخراج و نصب
-RUN tar -xf /tmp/ioncube.tar.gz -C /tmp \\
-    && mv /tmp/ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
+# 2. نصب ionCube Loader (لینک استاندارد)
+# جعل مرورگر برای عبور از فایروال دانلود
+RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
+    -L -o ioncube.tar.gz 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' \\
+    && tar -xf ioncube.tar.gz \\
+    && mv ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
     && echo "zend_extension=ioncube_loader_lin_8.1.so" > /usr/local/etc/php/conf.d/00-ioncube.ini \\
-    && rm -rf /tmp/ioncube /tmp/ioncube.tar.gz
+    && rm -rf ioncube ioncube.tar.gz
 EOF
 
 # Docker Compose
@@ -205,12 +193,52 @@ EOF
 
 # --- گام ۴: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Building custom image using LOCAL ioncube.tar.gz...${NC}"
+echo -e "${BLUE}>>> Building custom image (Debian Base + Standard ionCube)...${NC}"
+# فورس بیلد برای تغییر سیستم عامل
 docker compose build --no-cache
 
 # بررسی SSL
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Updating services...${NC}"
+    echo -e "${GREEN}>>> SSL config found. Applying updates...${NC}"
+    
+    # اعمال مجدد کانفیگ نهایی
+    cat > nginx/conf.d/default.conf <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+server {
+    listen 443 ssl;
+    server_name $DOMAIN_NAME www.$DOMAIN_NAME;
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem;
+    root /var/www/html;
+    index index.php;
+    client_max_body_size 64M;
+
+    location / { try_files \$uri \$uri/ /index.php?\$args; }
+    location ~ \.php$ {
+        try_files \$uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass wordpress:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PATH_INFO \$fastcgi_path_info;
+    }
+    location ^~ /pma/ {
+        proxy_pass http://phpmyadmin:80/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ { expires max; log_not_found off; }
+}
+EOF
+    
     docker compose down
     docker compose up -d
     echo -e "${BLUE}>>> Fixing Permissions...${NC}"
@@ -233,12 +261,12 @@ EOF
 
 docker compose up -d webserver
 sleep 10
-echo -e "${BLUE}>>> Requesting Certbot SSL for $DOMAIN_NAME...${NC}"
+echo -e "${BLUE}>>> Requesting SSL for $DOMAIN_NAME...${NC}"
 docker compose run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN_NAME -d www.$DOMAIN_NAME --email $EMAIL_ADDR --agree-tos --no-eff-email --force-renewal
 
 if [ ! -d "./certbot/conf/live/$DOMAIN_NAME" ]; then
     echo -e "${RED}!!! SSL FAILED !!!${NC}"
-    echo -e "${RED}Check DNS for $DOMAIN_NAME (Did you type it correctly?)${NC}"
+    echo -e "${RED}Please check your DNS records for $DOMAIN_NAME${NC}"
     exit 1
 fi
 
