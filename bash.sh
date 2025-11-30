@@ -6,9 +6,9 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${BLUE}#########################################################${NC}"
-echo -e "${BLUE}# WP Docker Auto Deploy (PDO Fix + phpMyAdmin Edition)  #${NC}"
-echo -e "${BLUE}#########################################################${NC}"
+echo -e "${BLUE}###################################################################${NC}"
+echo -e "${BLUE}# WP Docker Auto Deploy (PDO + ionCube + phpMyAdmin Edition)      #${NC}"
+echo -e "${BLUE}###################################################################${NC}"
 
 # --- بررسی دسترسی Root ---
 if [ "$EUID" -ne 0 ]; then
@@ -58,7 +58,9 @@ read -s -p "Enter Database User Password: " DB_USER_PASS
 echo ""
 
 PROJECT_DIR="/opt/$DOMAIN_NAME"
-mkdir -p "$PROJECT_DIR"
+if [ ! -d "$PROJECT_DIR" ]; then
+    mkdir -p "$PROJECT_DIR"
+fi
 cd "$PROJECT_DIR"
 
 echo -e "${GREEN}>>> Creating/Updating project files...${NC}"
@@ -91,13 +93,26 @@ post_max_size = 64M
 max_execution_time = 300
 EOF
 
-# Dockerfile (Fix PDO)
+# --- Dockerfile (PDO + ionCube) ---
+# این بخش قلب تپنده تغییرات است
 cat > Dockerfile <<EOF
 FROM wordpress:6.4-php8.1-fpm-alpine
+
+# نصب ابزارهای لازم برای دانلود
+RUN apk add --no-cache curl tar
+
+# 1. نصب درایورهای دیتابیس (PDO MySQL)
 RUN docker-php-ext-install pdo pdo_mysql
+
+# 2. نصب ionCube Loader (مخصوص Alpine و PHP 8.1)
+RUN curl -fsSL 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64_alpine.tar.gz' -o ioncube.tar.gz \\
+    && tar -xf ioncube.tar.gz \\
+    && mv ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
+    && echo "zend_extension=ioncube_loader_lin_8.1.so" > /usr/local/etc/php/conf.d/00-ioncube.ini \\
+    && rm -rf ioncube ioncube.tar.gz
 EOF
 
-# Docker Compose (Added phpMyAdmin)
+# Docker Compose
 cat > docker-compose.yml <<EOF
 version: '3.8'
 
@@ -174,14 +189,15 @@ EOF
 
 # --- گام ۴: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Building images...${NC}"
-docker compose build
+echo -e "${BLUE}>>> Building custom image (This installs ionCube & PDO)...${NC}"
+# فورس بیلد می‌کنیم تا کش قبلی باعث نشود نصب ionCube انجام نشود
+docker compose build --no-cache
 
-# اگر کانفیگ SSL از قبل هست (حالت آپدیت)
+# بررسی وجود SSL برای تصمیم‌گیری کانفیگ Nginx
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Updating Nginx with phpMyAdmin...${NC}"
+    echo -e "${GREEN}>>> SSL config found. Applying final config...${NC}"
     
-    # آپدیت کانفیگ Nginx برای اضافه شدن phpMyAdmin
+    # کانفیگ نهایی با SSL و phpMyAdmin
     cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -199,7 +215,6 @@ server {
     index index.php;
     client_max_body_size 64M;
 
-    # تنظیمات وردپرس
     location / { try_files \$uri \$uri/ /index.php?\$args; }
     location ~ \.php$ {
         try_files \$uri =404;
@@ -211,7 +226,6 @@ server {
         fastcgi_param PATH_INFO \$fastcgi_path_info;
     }
 
-    # تنظیمات phpMyAdmin
     location ^~ /pma/ {
         proxy_pass http://phpmyadmin:80/;
         proxy_set_header Host \$host;
@@ -230,13 +244,13 @@ EOF
     sleep 5
     docker exec wp_app chown -R www-data:www-data /var/www/html
     
-    echo -e "${GREEN}#######################################################${NC}"
-    echo -e "${GREEN} DONE! phpMyAdmin is available at: https://$DOMAIN_NAME/pma/ ${NC}"
-    echo -e "${GREEN}#######################################################${NC}"
+    echo -e "${GREEN}###################################################################${NC}"
+    echo -e "${GREEN} DONE! ionCube + PDO + phpMyAdmin installed successfully. ${NC}"
+    echo -e "${GREEN}###################################################################${NC}"
     exit 0
 fi
 
-# حالت نصب اولیه (اگر SSL نیست)
+# اگر برای اولین بار است (SSL نداریم)
 echo -e "${BLUE}>>> Setting up SSL for the first time...${NC}"
 
 cat > nginx/conf.d/default.conf <<EOF
@@ -257,7 +271,7 @@ if [ ! -d "./certbot/conf/live/$DOMAIN_NAME" ]; then
     exit 1
 fi
 
-# کانفیگ نهایی با phpMyAdmin
+# کانفیگ نهایی پس از SSL
 cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -286,7 +300,6 @@ server {
         fastcgi_param PATH_INFO \$fastcgi_path_info;
     }
 
-    # phpMyAdmin Location
     location ^~ /pma/ {
         proxy_pass http://phpmyadmin:80/;
         proxy_set_header Host \$host;
@@ -306,6 +319,6 @@ echo -e "${BLUE}>>> Fixing Permissions...${NC}"
 sleep 5
 docker exec wp_app chown -R www-data:www-data /var/www/html
 
-echo -e "${GREEN}#######################################################${NC}"
-echo -e "${GREEN} DONE! phpMyAdmin is available at: https://$DOMAIN_NAME/pma/ ${NC}"
-echo -e "${GREEN}#######################################################${NC}"
+echo -e "${GREEN}###################################################################${NC}"
+echo -e "${GREEN} DONE! ionCube + PDO + phpMyAdmin installed successfully. ${NC}"
+echo -e "${GREEN}###################################################################${NC}"
