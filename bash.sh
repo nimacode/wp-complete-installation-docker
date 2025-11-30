@@ -7,7 +7,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}#########################################################################${NC}"
-echo -e "${BLUE}#   WP UPDATE DEPLOY (Latest WP Core + All Loaders + Custom Structure)  #${NC}"
+echo -e "${BLUE}#   WP FINAL DEPLOY (SOAP + All Loaders + Latest Core + Fix Structure)  #${NC}"
 echo -e "${BLUE}#########################################################################${NC}"
 
 if [ "$EUID" -ne 0 ]; then
@@ -50,12 +50,12 @@ mkdir -p nginx/conf.d php certbot/conf certbot/www
 # .env
 cat > .env <<EOF
 MYSQL_ROOT_PASSWORD=$DB_ROOT_PASS
-MYSQL_DATABASE=wordpress
-MYSQL_USER=wp_user
+MYSQL_DATABASE=egdbwp
+MYSQL_USER=egusrwp
 MYSQL_PASSWORD=$DB_USER_PASS
 WORDPRESS_DB_HOST=db
-WORDPRESS_DB_NAME=wordpress
-WORDPRESS_DB_USER=wp_user
+WORDPRESS_DB_NAME=egdbwp
+WORDPRESS_DB_USER=egusrwp
 WORDPRESS_DB_PASSWORD=$DB_USER_PASS
 DOMAIN_NAME=$DOMAIN_NAME
 EOF
@@ -69,16 +69,15 @@ post_max_size = 128M
 max_execution_time = 600
 EOF
 
-# --- Dockerfile (UPDATED: Using Latest WordPress) ---
-# تغییر مهم: حذف 6.4 و استفاده از php8.1-fpm که آخرین نسخه وردپرس را می‌آورد
+# --- Dockerfile (UPDATED: Added SOAP) ---
 cat > Dockerfile <<EOF
 FROM wordpress:php8.1-fpm
 
-# نصب ابزارهای دانلود
-RUN apt-get update && apt-get install -y curl tar
+# نصب ابزارها + کتابخانه XML برای SOAP
+RUN apt-get update && apt-get install -y curl tar libxml2-dev
 
-# 1. نصب PDO
-RUN docker-php-ext-install pdo pdo_mysql
+# 1. نصب اکستنشن‌های PHP (شامل SOAP)
+RUN docker-php-ext-install pdo pdo_mysql soap
 
 # 2. نصب ionCube Loader
 RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o ioncube.tar.gz 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' \\
@@ -95,7 +94,7 @@ RUN curl -L -o sourceguardian.tar.gz https://www.sourceguardian.com/loaders/down
     && rm -rf sourceguardian.tar.gz *.lin
 EOF
 
-# --- Docker Compose (Shared Volume Fix) ---
+# --- Docker Compose ---
 cat > docker-compose.yml <<EOF
 version: '3.8'
 
@@ -118,12 +117,11 @@ services:
       - db
     env_file: .env
     volumes:
-      # 1. هسته وردپرس (index.php و ...) در والیوم داخلی
+      # هسته وردپرس
       - wp_core:/var/www/html
-      
-      # 2. پوشه wp_data شما (پلاگین‌ها و آپلودها)
+      # محتوای شما
       - ./wp_data:/var/www/html/wp-content
-      
+      # کانفیگ آپلود
       - ./php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
     networks:
       - wp_net
@@ -149,12 +147,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      # Nginx باید هسته را ببیند
       - wp_core:/var/www/html:ro
-      
-      # Nginx باید wp_data را ببیند
       - ./wp_data:/var/www/html/wp-content:ro
-      
       - ./nginx/conf.d:/etc/nginx/conf.d
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
@@ -182,16 +176,13 @@ EOF
 
 # --- گام ۳: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Updating WordPress to LATEST version (Rebuilding)...${NC}"
-# این دستور مهم است: فایل‌های هسته قدیمی در والیوم باید با نسخه جدید جایگزین شوند
-docker compose down --volumes
-# نکته: حذف والیوم‌ها باعث حذف دیتابیس نمیشود چون db_data جداست، ولی wp_core باید رفرش شود
-
+echo -e "${BLUE}>>> Rebuilding with SOAP extension...${NC}"
+# فورس بیلد می‌کنیم تا Dockerfile جدید خوانده شود
 docker compose build --no-cache
 
 # بررسی SSL
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Starting services...${NC}"
+    echo -e "${GREEN}>>> SSL config found. Applying final config...${NC}"
     
     # کانفیگ نهایی
     cat > nginx/conf.d/default.conf <<EOF
@@ -241,11 +232,11 @@ EOF
     echo -e "${BLUE}>>> Fixing Permissions...${NC}"
     sleep 10
     docker exec wp_app chown -R www-data:www-data /var/www/html/wp-content
-    echo -e "${GREEN}SUCCESS! WordPress Updated to Latest Version.${NC}"
+    echo -e "${GREEN}SUCCESS! SOAP Installed.${NC}"
     exit 0
 fi
 
-# اگر SSL نیست... (مراحل نصب اولیه)
+# اگر SSL نیست
 cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
@@ -254,14 +245,11 @@ server {
     location / { return 301 https://\$host\$request_uri; }
 }
 EOF
+
 docker compose up -d webserver
 sleep 10
 docker compose run --rm certbot certonly --webroot --webroot-path /var/www/certbot -d $DOMAIN_NAME -d www.$DOMAIN_NAME --email $EMAIL_ADDR --agree-tos --no-eff-email --force-renewal
 
-# کانفیگ نهایی SSL (همان بالا)
-# ... (برای جلوگیری از تکرار کد، فرض بر این است که اگر SSL گرفته شود، باید دستی کانفیگ بالا را اعمال کنید یا اسکریپت را دوباره اجرا کنید)
-# برای راحتی شما، اگر اسکریپت را دوباره اجرا کنید (چون فایل SSL هست) خودش کانفیگ نهایی را می‌زند.
-
 echo -e "${GREEN}###################################################################${NC}"
-echo -e "${GREEN} DONE! Please run the script ONE MORE TIME to finalize SSL if needed. ${NC}"
+echo -e "${GREEN} DONE! Please run script again to finalize SSL config. ${NC}"
 echo -e "${GREEN}###################################################################${NC}"
