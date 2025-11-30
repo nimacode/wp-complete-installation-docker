@@ -6,9 +6,9 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${BLUE}###################################################################${NC}"
-echo -e "${BLUE}# WP Docker Auto Deploy (Debian + Standard ionCube Edition)       #${NC}"
-echo -e "${BLUE}###################################################################${NC}"
+echo -e "${BLUE}#########################################################################${NC}"
+echo -e "${BLUE}# WP Docker Auto Deploy (Debian + PDO + ionCube + SourceGuardian)       #${NC}"
+echo -e "${BLUE}#########################################################################${NC}"
 
 # --- بررسی دسترسی Root ---
 if [ "$EUID" -ne 0 ]; then
@@ -95,25 +95,30 @@ post_max_size = 64M
 max_execution_time = 300
 EOF
 
-# --- Dockerfile (تغییر یافته به Debian) ---
-# مزیت: از لینک اصلی ionCube که شما دادید پشتیبانی می‌کند
+# --- Dockerfile (Debian + PDO + ionCube + SourceGuardian) ---
 cat > Dockerfile <<EOF
 FROM wordpress:6.4-php8.1-fpm
 
-# نصب ابزارهای دانلود (استفاده از apt به جای apk)
+# نصب ابزارهای دانلود
 RUN apt-get update && apt-get install -y curl tar
 
-# 1. نصب درایورهای دیتابیس (PDO)
+# 1. نصب PDO
 RUN docker-php-ext-install pdo pdo_mysql
 
-# 2. نصب ionCube Loader (لینک استاندارد)
-# جعل مرورگر برای عبور از فایروال دانلود
-RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
-    -L -o ioncube.tar.gz 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' \\
+# 2. نصب ionCube Loader
+RUN curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -L -o ioncube.tar.gz 'https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz' \\
     && tar -xf ioncube.tar.gz \\
     && mv ioncube/ioncube_loader_lin_8.1.so \$(php-config --extension-dir) \\
     && echo "zend_extension=ioncube_loader_lin_8.1.so" > /usr/local/etc/php/conf.d/00-ioncube.ini \\
     && rm -rf ioncube ioncube.tar.gz
+
+# 3. نصب SourceGuardian Loader
+# دانلود، اکسترکت و کپی فایل ixed.8.1.lin به مسیر اکستنشن‌ها
+RUN curl -L -o sourceguardian.tar.gz https://www.sourceguardian.com/loaders/download/loaders.linux-x86_64.tar.gz \\
+    && tar -xf sourceguardian.tar.gz \\
+    && cp ixed.8.1.lin \$(php-config --extension-dir) \\
+    && echo "extension=ixed.8.1.lin" > /usr/local/etc/php/conf.d/02-sourceguardian.ini \\
+    && rm -rf sourceguardian.tar.gz *.lin
 EOF
 
 # Docker Compose
@@ -193,15 +198,14 @@ EOF
 
 # --- گام ۴: بیلد و اجرا ---
 
-echo -e "${BLUE}>>> Building custom image (Debian Base + Standard ionCube)...${NC}"
-# فورس بیلد برای تغییر سیستم عامل
+echo -e "${BLUE}>>> Building custom image (With SourceGuardian)...${NC}"
 docker compose build --no-cache
 
 # بررسی SSL
 if [ -f "./nginx/conf.d/default.conf" ] && grep -q "listen 443 ssl" "./nginx/conf.d/default.conf"; then
-    echo -e "${GREEN}>>> SSL config found. Applying updates...${NC}"
+    echo -e "${GREEN}>>> SSL config found. Updating services...${NC}"
     
-    # اعمال مجدد کانفیگ نهایی
+    # کانفیگ نهایی
     cat > nginx/conf.d/default.conf <<EOF
 server {
     listen 80;
